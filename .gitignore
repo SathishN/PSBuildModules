@@ -1,0 +1,19 @@
+# Standard VS.NET and ReSharper Foo
+obj
+[Bb]in
+[Rr]elease
+*[Rr]eSharper*
+*.suo
+*.cache
+* Thumbs.db
+
+# Other useful stuff
+*.bak
+*.cache
+*.log
+*.swp
+_compareTemp
+_notes
+aspnet_client
+httpd.parse.errors
+*.orig
