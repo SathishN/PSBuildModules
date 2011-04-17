@@ -225,18 +225,14 @@ function GetHandlerProjectPaths {
 	}
 
 	if($null -eq $paths) { 
-		write-host "Paths was Null"
 		$paths = @()
 	}
-	
-	$isNull = ($null -eq $paths)
-	write-host ("Is Null: " + $isNull)
-	
+		
 	if($name) { 
 		return $paths | foreach { Get-HandlerName $_ } 
 	}
 	else {
-		$paths | foreach { write-verbose $_ }
+		$paths | foreach { write-verbose "Handler endpoint project found at: $_" }
 		return [array] $paths 
 	}
 }
@@ -345,21 +341,43 @@ function InstallHandler {
 		if($LastExitCode -ne 0) { write-error "$handlerName did not install correctly" }
 	}
 	
-	$paths | foreach {
+	write-host "Installing the following endpoints with the '$profile' profile:"
+	
+	$jobs = $paths | foreach {
 		$path = $_
 		$handlerName = Get-HandlerName $path
 		
-		write-host "Installing $handlerName using profile: $profile"
+		write-host "$handlerName"
 		
 		$nsbHostPath = join-path $path "NServiceBus.Host.exe"
 	
 		$args = @($nsbHostPath, $handlerName, $profile)
 		
 		if($session -ne $null) {
-			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock
+			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock -asJob -jobName $handlerName
 		}else {
-			$scriptBlock.Invoke($args)
+			start-job -scriptblock $scriptBlock -ArgumentList $args -name $handlerName
 		}
+	}
+	$success = $true;
+	
+	### Wait & Review the output from each job 
+	$jobs | Wait-Job | foreach {
+		$job = $_
+		if($job.State -eq "Failed") {
+			write-host ($job.Name + " failed to install because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
+			$success = $false
+		}
+		else {
+			write-host ($job.Name + " installed successfully")
+		}
+	}
+	
+	### Remove the jobs 
+	$jobs | Remove-Job
+	
+	if(!$success) {
+		write-error "One or more endpoints failed to install"
 	}
 	
 	if($session -ne $null) { Remove-PSSession $session }
@@ -390,21 +408,44 @@ function UninstallHandler {
 		if($LastExitCode -ne 0) { write-error "$handlerName did not uninstall correctly" }
 	}
 	
-	$paths | foreach {
+	write-host "Uninstalling the following endpoints:"
+	
+	$jobs = $paths | foreach {
 		$path = $_
 		$handlerName = Get-HandlerName $path
 
-		write-host "Uninstalling $handlerName"
+		write-host "$handlerName"
 
 		$nsbHostPath = join-path $path "NServiceBus.Host.exe"
 
 		$args = @($nsbHostPath, $handlerName)
 
 		if($session -ne $null) {
-			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock
+			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock -asJob -jobName $handlerName
 		}else {
-			$scriptBlock.Invoke($args)
+			start-job -scriptblock $scriptBlock -ArgumentList $args -name $handlerName
 		}
+	}
+	
+	$success = $true;
+	
+	### Wait & Review the output from each job 
+	$jobs | Wait-Job | foreach {
+		$job = $_
+		if($job.State -eq "Failed") {
+			write-host ($job.Name + " failed to uninstall because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
+			$success = $false
+		}
+		else {
+			write-host ($job.Name + " uninstalled successfully")
+		}
+	}
+	
+	### Remove the jobs 
+	$jobs | Remove-Job
+	
+	if(!$success) {
+		write-error "One or more endpoints failed to uninstall"
 	}
 	
 	if($session -ne $null) { Remove-PSSession $session }
@@ -422,7 +463,7 @@ function StartHandler {
 	$session = $null
 	
 	if($computerName -ne $null) {
-		write-verbose "Install-Handler on computer: $computerName"
+		write-verbose "Start-Handler on computer: $computerName"
 		$session = New-PSSession -computerName $computerName -credential $credential
 	}
 	
@@ -432,19 +473,42 @@ function StartHandler {
 		Start-Service $handlerName
 	}
 	
-	$paths | foreach {
+	write-host "Starting the following endpoints:"
+	
+	$jobs = $paths | foreach {
 		$path = $_
 		$handlerName = Get-HandlerName $path
 		
-		write-host "Starting $handlerName"
+		write-host "$handlerName"
 		
 		$args = @($handlerName)
 		
 		if($session -ne $null) {
-			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock
+			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock -asJob -jobName $handlerName
 		}else {
-			$scriptBlock.Invoke($args)
+			start-job -scriptblock $scriptBlock -ArgumentList $args -name $handlerName
 		}
+	}
+	
+	$success = $true;
+	
+	### Wait & Review the output from each job 
+	$jobs | Wait-Job | foreach {
+		$job = $_
+		if($job.State -eq "Failed") {
+			write-host ($job.Name + " failed to start because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
+			$success = $false
+		}
+		else {
+			write-host ($job.Name + " started successfully")
+		}
+	}
+	
+	### Remove the jobs 
+	$jobs | Remove-Job
+	
+	if(!$success) {
+		write-error "One or more endpoints failed to start"
 	}
 	
 	if($session -ne $null) { Remove-PSSession $session }
