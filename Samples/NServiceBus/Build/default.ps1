@@ -5,12 +5,15 @@ properties {
 	$src_directory = "$base_directory\Src"
 	
 	$compile_config = "debug"
+	$app_config = "local"
 	
 	$deploy_directory = "c:\deploy"
 
 	$deploy_computer = $null
 	$deploy_password = $null
 	$deploy_username = $null
+	
+	$nservicebus_profile = "NServiceBus.Lite"
 }
 
 #Environment overrides
@@ -43,7 +46,16 @@ task ReleaseHandlers -depends PackageHandlers {
 		$credential = new-object -typename System.Management.Automation.PSCredential -argumentlist $deploy_username,$password
 	}
 	
-	Release-Handler -projectPath $release_directory -destinationPath $deploy_directory -Recurse -verbose -computerName $deploy_computer -credential $credential
+	Release-Handler -projectPath $release_directory -destinationPath $deploy_directory -profile $nservicebus_profile -Recurse -verbose -computerName $deploy_computer -credential $credential
+}
+
+task CreateQueues -description "Development task to create queues" -depends Package {
+	if($deploy_username -ne $null ) {
+		$password = convertto-securestring -asPlainText -force -string $deploy_password
+		$credential = new-object -typename System.Management.Automation.PSCredential -argumentlist $deploy_username,$password
+	}
+	
+	New-HandlerInputQueue -path $release_directory -Recurse -verbose -computerName $deploy_computer -credential $credential
 }
 
 task UninstallHandlers {
@@ -52,7 +64,7 @@ task UninstallHandlers {
 		$credential = new-object -typename System.Management.Automation.PSCredential -argumentlist $deploy_username,$password
 	}
 	
-	Uninstall-Handler -path $release_directory -Recurse -computerName $deploy_computer -credential $credential
+	Uninstall-Handler -path $deploy_directory -Recurse -computerName $deploy_computer -credential $credential
 }
 
 task CreateReleaseDirectory {
@@ -65,11 +77,11 @@ task PackageHandlers -depends Clean, Compile, CreateReleaseDirectory {
 
 task Compile -Precondition { !($skipCompile -ne $null) } -Action {
 	Compile-MSBuild -solutionfile $src_directory -configuration $compile_config -ea Stop
-	Transform-ConfigFileForProject -projectPath $src_directory -configuration $compile_config -recurse -ea Stop
+	Transform-ConfigFileForProject -projectPath $src_directory -configuration $compile_config -environment $app_config -recurse -ea Stop
 }
 
 task Clean {
 	Clean-Item $release_directory
-	get-Item -path "$base_directory\*" -include "_ReSharper.*" -force | Clean-Item
-	get-Item -path "$base_directory\*" -include "*.suo", "*.user", "*.cache", "_ReSharper*" -force | Clean-Item
+	get-Item -path "$base_directory\*" -include "_ReSharper.*" -force | Clean-Item -ea Continue
+	get-Item -path "$base_directory\*" -include "*.suo", "*.user", "*.cache", "_ReSharper*" -force | Clean-Item -ea Continue
 }

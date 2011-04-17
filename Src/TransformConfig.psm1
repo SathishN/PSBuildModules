@@ -13,10 +13,13 @@ function Transform-ConfigFileForProject {
 		[ValidateNotNullOrEmpty()]
 		$projectPath,
 		$configuration,
+		$environment,
 		[switch] $recurse
 	)
 
 	write-host ("Transforming config for projects in: {0}" -f $projectPath)
+	
+	if($environment -eq $null) { $environment = $configuration }
 		
 	GetProjectPaths -path $projectPath -recurse:$recurse | foreach {
 		$path = $_
@@ -30,7 +33,7 @@ function Transform-ConfigFileForProject {
 			$continue = $true
 		}
 
-		$transformFile = join-path $path ("App.{0}.config" -f $configuration)
+		$transformFile = join-path $path ("App.{0}.config" -f $environment)
 		
 		if(($continue -eq $false) -and !(test-path $transformFile -pathType Leaf)) {
 			write-host ("Skipping transform. Transform file not found at: {0}" -f $transformFile)

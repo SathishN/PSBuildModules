@@ -6,6 +6,7 @@ function Release-Handler {
 		[parameter(Mandatory=$true)]
 		[ValidateNotNullOrEmpty()]
 		$destinationPath,
+		$profile,
 		[switch] $recurse,
 		[switch] $skipUninstall,
 		[switch] $skipCreateQueues,
@@ -27,7 +28,7 @@ function Release-Handler {
 
 	$installPaths = @(GetHandlerProjectPaths -path $destinationPath -recurse:$recurse -computerName $computerName -credential $credential)
 
-	InstallHandler -paths $installPaths -computerName $computerName -credential $credential
+	InstallHandler -paths $installPaths -profile $profile -computerName $computerName -credential $credential
 
 	StartHandler -paths $installPaths -computerName $computerName -credential $credential
 }
@@ -93,6 +94,7 @@ function Install-Handler {
 		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
 		[ValidateNotNullOrEmpty()]
 		$path,
+		$profile,
 		[switch] $recurse,
 		$computerName,
 		$credential
@@ -100,7 +102,7 @@ function Install-Handler {
 	
 	$paths = @(GetHandlerProjectPaths -path $path -recurse:$recurse -computerName $computerName)
 	
-	InstallHandler -paths $paths -computerName $computerName
+	InstallHandler -paths $paths -profile $profile -computerName $computerName
 }
 
 function Uninstall-Handler {
@@ -159,17 +161,28 @@ function Get-HandlerInputQueue {
 	
 	$handlerName = $path.Name
 	
-	$appConfig = join-path $path.FullName "$handlerName.dll.config"
+	$projectAppConfig = join-path $path.FullName "$handlerName.dll.config"
+	$timeoutAppConfig = join-path $path.FullName "Timeout.MessageHandlers.dll.config"
 	
-	if(!(test-path $appConfig)) { write-error "Handler app.config does not exist: $appConfig" }
+	$appConfig = $projectAppConfig
 	
-	$inputQueue = Select-Xml "//MsmqTransportConfig/@InputQueue[1]" -path $appConfig
+	if(!(test-path $appConfig)) { 
+		$appConfig = $timeoutAppConfig
+	}
 	
-	if($inputQueue -eq $null) { write-error "The app.config does not have an MsmqTransportConfig element: $appConfig" }
+	if(!(test-path $appConfig)) { write-error "Handler app.config does not exist at: $projectAppConfig or at $timeoutAppConfig" }
+
+	$inputQueue = Select-Xml "//UnicastBusConfig/@LocalAddress[1]" -path $appConfig
+	
+	if($inputQueue -eq $null) { 
+		$inputQueue = Select-Xml "//MsmqTransportConfig/@InputQueue[1]" -path $appConfig
+	}
+
+	if($inputQueue -eq $null) { write-error "Input queue is not defined in either UnicastBusConfig or an MsmqTransportConfig element: $appConfig" }
 	
 	$queueName =  $inputQueue.Node.Value
 	
-	if($queueName -eq $null) { write-error "The MsmqTransportConfig element is missing the inputQueue attribute in app.config: $appConfig" }
+	if($queueName -eq $null) { write-error "Could not parse the inputQueue attribute in app.config: $appConfig" }
 	
 	return $queueName
 }
@@ -179,7 +192,7 @@ function GetHandlerProjectPaths {
 		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
 		[ValidateNotNullOrEmpty()]
 		[string] $path,
-		[string[]] $include = @("*.Handlers","*.Saga","*.Service"),
+		[string[]] $include = @("*.Handlers","*.Saga","*.Service","*.TimeoutManager"),
 		[switch] $name,
 		[switch] $recurse,
 		$computerName,
@@ -307,6 +320,7 @@ function InstallHandler {
 		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
 		[ValidateNotNull()]
 		$paths,
+		$profile,
 		$computerName,
 		$credential
 	)
@@ -314,15 +328,19 @@ function InstallHandler {
 	$session = $null
 	
 	if($computerName -ne $null) {
+		$profile = "NServiceBus.Lite"
+	}
+	
+	if($computerName -ne $null) {
 		write-verbose "Install-Handler on computer: $computerName"
 		$session = New-PSSession -computerName $computerName -credential $credential
 	}
 	
 	$scriptBlock = {
-		Param($nsbHostPath, $handlerName)
+		Param($nsbHostPath, $handlerName, $profile)
 		if(!(test-path $nsbHostPath)) { write-error "Could not install handler '$handlerName' Unable to find NServiceBus.Host.exe at $nsbHostPath" }
 
-		& $nsbHostPath /install /serviceName:$handlerName /displayName:$handlerName
+		& $nsbHostPath $profile /install /serviceName:$handlerName /displayName:$handlerName
 
 		if($LastExitCode -ne 0) { write-error "$handlerName did not install correctly" }
 	}
@@ -331,21 +349,17 @@ function InstallHandler {
 		$path = $_
 		$handlerName = Get-HandlerName $path
 		
-		write-host "Installing $handlerName"
+		write-host "Installing $handlerName using profile: $profile"
 		
 		$nsbHostPath = join-path $path "NServiceBus.Host.exe"
 	
-		$args = @($nsbHostPath, $handlerName)
+		$args = @($nsbHostPath, $handlerName, $profile)
 		
 		if($session -ne $null) {
-			write-host "Installing Remotelty"
 			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock
 		}else {
-			write-host "Installing Locally"
 			$scriptBlock.Invoke($args)
 		}
-		
-		write-host "$handlerName Installed"
 	}
 	
 	if($session -ne $null) { Remove-PSSession $session }
@@ -371,12 +385,8 @@ function UninstallHandler {
 		Param($nsbHostPath, $handlerName)
 		if(!(test-path $nsbHostPath)) { write-error "Could not uninstall handler '$handlerName' Unable to find NServiceBus.Host.exe at $nsbHostPath" }
 
-		write-host "Calling NServiceBus.Host.exe"
-		
 		& $nsbHostPath /uninstall /serviceName:$handlerName
 
-		write-verbose ("NServiceBus.Host.exe exited with {0}" -f $LastExitCode)
-		
 		if($LastExitCode -ne 0) { write-error "$handlerName did not uninstall correctly" }
 	}
 	
@@ -391,10 +401,8 @@ function UninstallHandler {
 		$args = @($nsbHostPath, $handlerName)
 
 		if($session -ne $null) {
-			write-verbose "Uninstalling Remotely"
 			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock
 		}else {
-			write-verbose "Uninstalling Locally"
 			$scriptBlock.Invoke($args)
 		}
 	}

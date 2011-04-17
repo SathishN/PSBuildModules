@@ -1,4 +1,5 @@
 $compile_config = "Release"
+$app_config = "ci"
 
 #$deploy_directory = "c:\deploy"
 
