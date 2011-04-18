@@ -10,7 +10,7 @@ function New-PrivateMSMQQueue {
 	) 
 	
 	$scriptblock = {
-		Param($name, $admins)
+		Param($name, $admins, $transactional)
 		[void][System.Reflection.Assembly]::LoadWithPartialName("System.Messaging")
 		
 		$queuePath = ".\private$\$name"
@@ -43,7 +43,7 @@ function New-PrivateMSMQQueue {
 		}
 	}
 	
-	$args = @($name, $admins)
+	$args = @($name, $admins, $transactional)
 	
 	if($computerName -ne $null) {
 		write-verbose "New-PrivateMSMQQueue on computer: $computerName"
