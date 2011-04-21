@@ -14,6 +14,8 @@ properties {
 	$deploy_username = $null
 	
 	$nservicebus_profile = "NServiceBus.Lite"
+	
+	$solutionFile = "$src_directory\PubSub.sln"
 }
 
 #Environment overrides
@@ -56,6 +58,10 @@ task CreateQueues -description "Development task to create queues" -depends Pack
 	}
 	
 	New-HandlerInputQueue -path $release_directory -Recurse -verbose -computerName $deploy_computer -credential $credential
+}
+
+task SetStartupProjects -description "Development task to set the startup projects for a solution" {
+	Set-StartupProjects -solutionFile $solutionFile
 }
 
 task UninstallHandlers {
