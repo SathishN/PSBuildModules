@@ -209,7 +209,12 @@ function GetHandlerProjectPaths {
 		Param($rootPath, $include)
 		$includePath = $rootPath.TrimEnd('\') + "*"
 		
-		get-childitem -path $includePath -include $include -recurse | where { $_.PsIsContainer }
+		if((test-path $path -pathType container) -eq $false) {
+			@()
+		}
+		else {
+			get-childitem -path $includePath -include $include -recurse | where { $_.PsIsContainer }
+		}
 	}
 		
 	$args = @($path, $include)
@@ -279,6 +284,10 @@ function DeployHandler {
 		$computerName,
 		$credential
 	)
+	
+	if((test-path $destinationPath -pathType container) -eq $false) {
+		New-Item $destinationPath -type directory
+	}
 	
 	$paths | foreach {
 		$path = $_
@@ -359,25 +368,29 @@ function InstallHandler {
 			start-job -scriptblock $scriptBlock -ArgumentList $args -name $handlerName
 		}
 	}
-	$success = $true;
 	
-	### Wait & Review the output from each job 
-	$jobs | Wait-Job | foreach {
-		$job = $_
-		if($job.State -eq "Failed") {
-			write-host ($job.Name + " failed to install because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
-			$success = $false
+	if($jobs -ne $null) {
+	
+		$success = $true;
+	
+		### Wait & Review the output from each job 
+		$jobs | Wait-Job | foreach {
+			$job = $_
+			if($job.State -eq "Failed") {
+				write-host ($job.Name + " failed to install because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
+				$success = $false
+			}
+			else {
+				write-host ($job.Name + " installed successfully")
+			}
 		}
-		else {
-			write-host ($job.Name + " installed successfully")
+		
+		### Remove the jobs 
+		$jobs | Remove-Job
+		
+		if(!$success) {
+			write-error "One or more endpoints failed to install"
 		}
-	}
-	
-	### Remove the jobs 
-	$jobs | Remove-Job
-	
-	if(!$success) {
-		write-error "One or more endpoints failed to install"
 	}
 	
 	if($session -ne $null) { Remove-PSSession $session }
@@ -426,26 +439,28 @@ function UninstallHandler {
 			start-job -scriptblock $scriptBlock -ArgumentList $args -name $handlerName
 		}
 	}
-	
-	$success = $true;
-	
-	### Wait & Review the output from each job 
-	$jobs | Wait-Job | foreach {
-		$job = $_
-		if($job.State -eq "Failed") {
-			write-host ($job.Name + " failed to uninstall because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
-			$success = $false
+		
+	if($jobs -ne $null) {
+		$success = $true;
+		
+		### Wait & Review the output from each job 
+		$jobs | Wait-Job | foreach {
+			$job = $_
+			if($job.State -eq "Failed") {
+				write-host ($job.Name + " failed to uninstall because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
+				$success = $false
+			}
+			else {
+				write-host ($job.Name + " uninstalled successfully")
+			}
 		}
-		else {
-			write-host ($job.Name + " uninstalled successfully")
+		
+		### Remove the jobs 
+		$jobs | Remove-Job
+		
+		if(!$success) {
+			write-error "One or more endpoints failed to uninstall"
 		}
-	}
-	
-	### Remove the jobs 
-	$jobs | Remove-Job
-	
-	if(!$success) {
-		write-error "One or more endpoints failed to uninstall"
 	}
 	
 	if($session -ne $null) { Remove-PSSession $session }
@@ -490,27 +505,28 @@ function StartHandler {
 		}
 	}
 	
-	$success = $true;
-	
-	### Wait & Review the output from each job 
-	$jobs | Wait-Job | foreach {
-		$job = $_
-		if($job.State -eq "Failed") {
-			write-host ($job.Name + " failed to start because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
-			$success = $false
+	if($jobs -ne $null) {
+		$success = $true;
+		
+		### Wait & Review the output from each job 
+		$jobs | Wait-Job | foreach {
+			$job = $_
+			if($job.State -eq "Failed") {
+				write-host ($job.Name + " failed to start because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
+				$success = $false
+			}
+			else {
+				write-host ($job.Name + " started successfully")
+			}
 		}
-		else {
-			write-host ($job.Name + " started successfully")
+		
+		### Remove the jobs 
+		$jobs | Remove-Job
+		
+		if(!$success) {
+			write-error "One or more endpoints failed to start"
 		}
 	}
-	
-	### Remove the jobs 
-	$jobs | Remove-Job
-	
-	if(!$success) {
-		write-error "One or more endpoints failed to start"
-	}
-	
 	if($session -ne $null) { Remove-PSSession $session }
 }
 
