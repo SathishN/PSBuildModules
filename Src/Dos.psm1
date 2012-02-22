@@ -12,21 +12,25 @@ function Invoke-DosCommand {
 	0..($programArgs.Count-1) | foreach-object { Write-Verbose " $($_+1): $($programArgs[$_])" }
 	
 	if($computerName -eq $null) {
-		& $program $programArgs
+		& $program $programArgs | Out-Host
+
 		$exitCode = $LastExitCode
 	}
 	else {
 		$session = New-PSSession -computername $computerName
 		
-		$exitCode = invoke-command -session $session -argumentList @($program, $programArgs) -scriptblock { 
+		invoke-command -session $session -argumentList @($program, $programArgs) -scriptblock { 
 			Param($program, $programArgs)
 			& $program $programArgs | out-null
-			return $LastExitCode
-		}
+		} | Out-Host
 		
-		remove-pssession -session $session | out-null
+		$exitCode = invoke-command -session $session { 
+			$LastExitCode
+		}
+
+		remove-pssession -session $session | out-null		
 	}
-	
+
 	if($passThru.IsPresent) {
 		return $exitCode
 	}
@@ -37,12 +41,21 @@ function Expect-ExitCode {
 		[parameter(Position=0)]
 		[Int32[]] $expectedExitCode = @(0),
 		[parameter(Position=1)]
-		[string] $message = "Exit Code was not expected",
-		[parameter(ValueFromPipeline = $true, Position=2)]
+		$formatMessage = $null,
+		[parameter(ValueFromPipeline = $true, Position=3)]
 		[Int32] $exitCode = $LastExitCode
 	)
 	if(!($expectedExitCode -contains $exitCode)) {
-		write-verbose ("Exit Code {0} was not expected" -f $exitCode)
+		write-verbose "Exit Code $exitCode was not expected"
+		
+		if($formatMessage -ne $null) {
+			$message = invoke-command -argumentList @($exitCode) -scriptblock $formatMessage
+		}
+		
+		if($message -eq $null) {
+			$message = "Exit Code was not expected"
+		}
+		
 		throw $message
 	}
 }

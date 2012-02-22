@@ -101,7 +101,7 @@ function Package-WebApplicationProject {
 	#The \\\ on the OutDir param is needed for paths with spaces... WTF MSBuild...
 	Invoke-MSBuild $arguments
 			
-	Expect-ExitCode -message "Package failed"
+	Expect-ExitCode -expectedExitCode 0 -formatMessage { param($taskName) "Package failed" }
 }
 
 function CompileMSBuild {
@@ -136,7 +136,7 @@ function CompileMSBuild {
 	#The \\\ on the OutDir param is needed for paths with spaces... WTF MSBuild...
 	Invoke-MSBuild $arguments
 			
-	Expect-ExitCode -message "Compile failed"
+	Expect-ExitCode -expectedExitCode 0 -formatMessage { param($taskName) "Compile failed" }
 }
 
 Export-ModuleMember -Function "Invoke-MSBuild", "Compile-MSBuild", "Get-SolutionFiles", "Package-WebApplicationProject"

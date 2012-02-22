@@ -60,5 +60,5 @@ function Copy-Files {
 	
 	robocopy.exe $arguments | out-null
 	
-	Expect-ExitCode 0,1 "Copy was not successful"
+	Expect-ExitCode -expectedExitCode 0,1 -formatMessage { param($taskName) "Copy was not successful" }
 }

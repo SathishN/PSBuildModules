@@ -8,20 +8,22 @@ function New-ZipFile {
 		[parameter(Mandatory=$true, Position=0)]
 		[string]$zipFileName,
 		[parameter(Mandatory=$true, Position=1)]
-		[string]$directory
+		[string[]]$directory
 	)
 
 	[System.Reflection.Assembly]::LoadFrom($script:zipConfig.zipLibPath) | out-null;
-
-	$files = get-childItem $directory
 	
 	$zipfile =  new-object Ionic.Zip.ZipFile
 
 	try {
-		$zipfile.AddDirectory($directory) | out-null
+		foreach($dir in $directory) {
+			$dName = split-path $dir -leaf
+			$zipfile.AddDirectory($dir, $dName) | out-null
+		}
 
 		write-verbose ("Saving zip file to {0}" -f $zipFileName)
 		$zipfile.Save($zipFileName)
+		$zipfile.Dispose() | out-null
 	} 
 	catch [Exception]
 	{
@@ -29,4 +31,83 @@ function New-ZipFile {
 	}
 }
 
-Export-ModuleMember -Function "New-ZipFile"
+function Get-ZipChildItems {
+	param(
+		[parameter(Mandatory=$true, Position=0)]
+		[string]$zipPath
+	)
+
+	[System.Reflection.Assembly]::LoadFrom($script:zipConfig.zipLibPath) | out-null;
+
+	try {
+		$zipfile = [Ionic.Zip.ZipFile]::Read($zipPath) 
+		
+		foreach($file in $zipfile) {
+				$file.FileName
+		} 
+		
+		$zipfile.Dispose() | out-null
+	} 
+	catch [Exception]
+	{
+		write-error $_.Exception
+	}
+}
+
+function Extract-ZipFile {
+	param(
+		[parameter(Mandatory=$true, Position=0)]
+		[string]$zipPath,
+		[parameter(Mandatory=$true, Position=0)]
+		[string]$destination,
+		[string[]]$files
+	)
+	
+	[System.Reflection.Assembly]::LoadFrom($script:zipConfig.zipLibPath) | out-null;
+	
+	try {
+		$zipfile = [Ionic.Zip.ZipFile]::Read($zipPath) 
+		
+		foreach($file in $files) {
+			$item = $zipfile[$file]
+			
+			if($item -ne $null) {
+				$item.Extract($destination, [Ionic.Zip.ExtractExistingFileAction]::OverwriteSilently)
+			}
+		}
+		
+		$zipfile.Dispose() | out-null
+	} 
+	catch [Exception]
+	{
+		write-error $_.Exception
+	}
+}
+
+function Update-ZipFile {
+	param(
+		[parameter(Mandatory=$true, Position=0)]
+		[string]$zipPath,
+		[parameter(Mandatory=$true, Position=0)]
+		[string[]]$files
+	)
+	
+	[System.Reflection.Assembly]::LoadFrom($script:zipConfig.zipLibPath) | out-null;
+	
+	try {
+		$zipfile = [Ionic.Zip.ZipFile]::Read($zipPath) 
+		
+		foreach($file in $files) {
+			$zipfile.UpdateFile($file,"") | out-null;
+		}
+		
+		$zipfile.Save() | out-null
+		$zipfile.Dispose() | out-null
+	} 
+	catch [Exception]
+	{
+		write-error $_.Exception
+	}
+}
+
+Export-ModuleMember -Function "New-ZipFile", "Get-ZipChildItems", "Extract-ZipFile", "Update-ZipFile"

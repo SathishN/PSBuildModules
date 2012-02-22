@@ -6,72 +6,189 @@ function Release-Handler {
 		[parameter(Mandatory=$true)]
 		[ValidateNotNullOrEmpty()]
 		$destinationPath,
+		$include = "\.Handlers$",
+		$exclude,
 		$profile,
-		[switch] $recurse,
-		[switch] $skipUninstall,
-		[switch] $skipCreateQueues,
+		$admins = @("NT AUTHORITY\SYSTEM"),
 		$computerName,
 		$credential
 	)
+
+	$session = $null
 	
-	if(!$skipUninstall) {
-		$uninstallPaths = @(GetHandlerProjectPaths -path $destinationPath -recurse:$recurse -computerName $computerName -credential $credential)
-		
-		UninstallHandler -paths $uninstallPaths -computerName $computerName -credential $credential
+	if($computerName -ne $null) {
+		$session = New-PSSession -computerName $computerName -credential $credential
 	}
 	
-	$paths = GetHandlerProjectPaths -path $projectPath -recurse:$recurse
+	$syncInfo = GetHandlerSyncInfo -sourcePath $projectPath -destinationPath $destinationPath -include $include -exclude $exclude -session $session
+	
+	write-host "Handler sync info:"
+	
+	$syncInfo.Values | format-list -property Name, Action, Path, DestinationPath
+	
+	StopServices -syncInfo $syncInfo -session $session
 
-	DeployHandler -paths $paths -destinationPath $destinationPath -computerName $computerName -credential $credential
+	UninstallServices -syncInfo $syncInfo -session $session
+	
+	write-host "Waiting for 30 seconds to ensure that all services have stopped"
+	start-sleep -seconds 30
 
-	NewHandlerInputQueue -paths $paths -computerName $computerName -credential $credential
+	SyncHandlerFolders -syncInfo $syncInfo -session $session
+    
+	InstallQueues -syncInfo $syncInfo -profile $profile -session $session
 
-	$installPaths = @(GetHandlerProjectPaths -path $destinationPath -recurse:$recurse -computerName $computerName -credential $credential)
-
-	InstallHandler -paths $installPaths -profile $profile -computerName $computerName -credential $credential
-
-	StartHandler -paths $installPaths -computerName $computerName -credential $credential
+	InstallServices -syncInfo $syncInfo -session $session
+	
+	StartServices -syncInfo $syncInfo -session $session
 }
 
-function Get-HandlerProjectPaths {
+function Uninstall-Handler {
 	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
+		[parameter(Mandatory=$true)]
 		[ValidateNotNullOrEmpty()]
-		[string] $path,
-		[string[]] $include = @("*.Handlers","*.Saga","*.Service"),
-		[switch] $name,
+		$path,
 		$computerName,
 		$credential
 	)
-	return @(GetHandlerProjectPaths -path $path -include $include -name:$name -computerName $computerName -recurse)
-}
 
-function Get-HandlerName {
-	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNullOrEmpty()]
-		$path
-	)
+	$session = $null
 	
-	return $path.Name
+	if($computerName -ne $null) {
+		$session = New-PSSession -computerName $computerName -credential $credential
+	}
+	
+	$info = GetHandlerProjectInfo -path $path -session $session
+
+	#get destinations that should be uninstalled
+	$info.Values | foreach {
+		$_ | add-member -membertype noteproperty -name Action -value "Uninstall"
+	}
+	
+	write-host "Handler Info:"
+	
+	$info.Values | format-list -property Name, Path
+	
+	UninstallServices -syncInfo $info -session $session
+	
+	SyncHandlerFolders -syncInfo $info -session $session
 }
 
-function Deploy-Handler {
+function Create-HandlerQueues {
 	param(
 		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
 		[ValidateNotNullOrEmpty()]
 		$projectPath,
-		[parameter(Mandatory=$true)]
-		[ValidateNotNullOrEmpty()]
-		$destinationPath,
-		[switch] $recurse,
+		$admins = @("NT AUTHORITY\SYSTEM"),
 		$computerName,
 		$credential
 	)
-
-	$paths = @(GetHandlerProjectPaths -path $projectPath -recurse:$recurse -computerName $computerName)
 	
-	DeployHandler -paths $paths -destinationPath $destinationPath -computerName $computerName
+	$session = $null
+	
+	if($computerName -ne $null) {
+		$session = New-PSSession -computerName $computerName -credential $credential
+	}
+	
+	$handlerProjectInfos = GetHandlerProjectInfo -path $projectPath -session $session
+
+	$handlerProjectInfos.Values | foreach {
+		$inputQueueName = $_.Name
+		
+		write-host "Creating handler queue: $inputQueueName"
+
+		New-PrivateMSMQQueue -name $inputQueueName -admins $admins -session $session
+	}
+}
+
+function GetHandlerSyncInfo {
+	param(
+		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
+		[ValidateNotNullOrEmpty()]
+		[string] $sourcePath,
+		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
+		[ValidateNotNullOrEmpty()]
+		[string] $destinationPath,
+		[string] $include,
+		[string] $exclude,
+		$session
+	)
+	
+	$syncInfos = @{}
+	
+	$sourceInfo = GetHandlerProjectInfo -path $sourcePath -include $include -exclude $exclude
+	$destinationInfo = GetHandlerProjectInfo -path $destinationPath -include $include -session $session
+
+	write-verbose "Handlers at source:"
+	$sourceInfo.Values | foreach { write-verbose $_.Name }
+	write-verbose ""
+	write-verbose "Handlers at destination:"
+	$destinationInfo.Values | foreach { write-verbose $_.Name }
+	
+	$sourceInfo.Values | where { $_.Name -ne $null } | foreach { 
+			$handlerDestPath = (join-path -path $destinationPath -childPath $_.Name)
+			$handlerExePath = (join-path -path $handlerDestPath -childPath "NServiceBus.Host.exe")
+			
+			$info = $_ | add-member -membertype noteproperty -name Action -value "Install" -PassThru |
+				 add-member -membertype noteproperty -name DestinationPath -value $handlerDestPath -PassThru |
+				 add-member -membertype noteproperty -name DestinationExePath -value $handlerExePath -PassThru
+
+			$syncInfos[$info.Name] = $info
+		}
+	
+	#get destinations that should be uninstalled
+	$destinationInfo.Values | where { $_.Name -ne $null -and $sourceInfo[$_.Name] -eq $null } | foreach {
+		$info = $_ | add-member -membertype noteproperty -name Action -value "Uninstall" -PassThru
+		$syncInfos[$info.Name] = $info
+	}
+	
+	return [HashTable] $syncInfos
+}
+
+function GetHandlerProjectInfo {
+	param(
+		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
+		[ValidateNotNullOrEmpty()]
+		[string] $path,
+		[string] $include = "\.Handlers$",
+		[string] $exclude,
+		$session
+	)
+
+	write-host "Getting Handler Project Infos"
+	$paths = Invoke-CommandLocalOrRemotely -session $session -argumentList @($path, $include, $exclude) -scriptblock {
+		Param($includePath, $include, $exclude)
+
+		$infos = @{}
+
+		write-host "Getting Handler Project Infos at $includePath"
+
+		if((test-path $includePath -pathType container) -eq $true) 
+		{
+			$items = get-childitem -path $includePath -recurse | 
+				where { $_.PsIsContainer } | 
+				where { $_ -match $include }
+						
+			if(![string]::IsNullOrEmpty($exclude)) {
+				$items = $items | where { $_ -notmatch $exclude }
+			}
+
+			$items | foreach {
+				if($_ -ne $null) {
+					$info = $_
+					
+					$info = New-Object Object |            
+						Add-Member NoteProperty Name $_.Name -PassThru |
+						Add-Member NoteProperty Path $_.FullName -PassThru
+
+					$infos[$info.Name] = $info
+				}
+			}
+		}
+
+		return [HashTable] $infos
+	}
+
+	return [HashTable] $paths
 }
 
 function Package-Handler {
@@ -81,110 +198,34 @@ function Package-Handler {
 		$projectPath,
 		$destination,
 		[string] $configuration,
+		[string] $include = "\.Handlers$",
+		[string] $exclude,
 		[switch] $recurse
 	)
 	
-	$paths = @(GetHandlerProjectPaths -path $projectPath -recurse:$recurse -computerName $computerName)
+	$paths = @(GetHandlerProjectPaths -path $projectPath -include $include -exclude $exclude -recurse:$recurse -computerName $computerName)
 	
-	PackageHandler -paths $paths -destination $destination -configuration $configuration
-}
-
-function Install-Handler {
-	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNullOrEmpty()]
-		$path,
-		$profile,
-		[switch] $recurse,
-		$computerName,
-		$credential
-	)
 	
-	$paths = @(GetHandlerProjectPaths -path $path -recurse:$recurse -computerName $computerName)
-	
-	InstallHandler -paths $paths -profile $profile -computerName $computerName
-}
-
-function Uninstall-Handler {
-	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNullOrEmpty()]
-		$path,
-		[switch] $recurse,
-		$computerName,
-		$credential
-	)
-	
-	$paths = @(GetHandlerProjectPaths -path $path -recurse:$recurse -computerName $computerName)
-	
-	UninstallHandler -paths $paths
-}
-
-function Start-Handler {
-	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNullOrEmpty()]
-		$path,
-		[switch] $recurse,
-		$computerName,
-		$credential
-	)
-	
-	$paths = @(GetHandlerProjectPaths -path $projectPath -recurse:$recurse -computerName $computerName)
-	
-	StartHandler -paths $paths -computerName $computerName
-}
-
-function New-HandlerInputQueue {
-	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNullOrEmpty()]
-		$path,
-		[switch] $recurse,
-		$computerName,
-		$credential
-	)
-
-	$paths = @(GetHandlerProjectPaths -path $path -recurse:$recurse -computerName $computerName)
-
-	NewHandlerInputQueue -paths $paths -computerName $computerName -credential $credential
-}
-
-function Get-HandlerInputQueue {
-	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNullOrEmpty()]
-		$path
-	)
-	
-	if(!(test-path $path.FullName)) { write-error ("Handler path does not exist: " + $path.FullName) }
-	
-	$handlerName = $path.Name
-	
-	$projectAppConfig = join-path $path.FullName "$handlerName.dll.config"
-	$timeoutAppConfig = join-path $path.FullName "Timeout.MessageHandlers.dll.config"
-	
-	$appConfig = $projectAppConfig
-	
-	if(!(test-path $appConfig)) { 
-		$appConfig = $timeoutAppConfig
+	if($paths -eq $null -or $paths.Length -eq 0) {
+		write-host "No handlers found"
 	}
-	
-	if(!(test-path $appConfig)) { write-error "Handler app.config does not exist at: $projectAppConfig or at $timeoutAppConfig" }
-
-	$inputQueue = Select-Xml "//UnicastBusConfig/@LocalAddress[1]" -path $appConfig
-	
-	if($inputQueue -eq $null) { 
-		$inputQueue = Select-Xml "//MsmqTransportConfig/@InputQueue[1]" -path $appConfig
+	else {
+		PackageHandler -paths $paths -destination $destination -configuration $configuration
 	}
+}
 
-	if($inputQueue -eq $null) { write-error "Input queue is not defined in either UnicastBusConfig or an MsmqTransportConfig element: $appConfig" }
-	
-	$queueName =  $inputQueue.Node.Value
-	
-	if($queueName -eq $null) { write-error "Could not parse the inputQueue attribute in app.config: $appConfig" }
-	
-	return $queueName
+function Get-HandlerProjectPaths {
+	param(
+		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
+		[ValidateNotNullOrEmpty()]
+		[string] $path,
+		[string] $include = "\.Handlers$",
+		[string] $exclude,
+		[switch] $name,
+		$computerName,
+		$credential
+	)
+	return @(GetHandlerProjectPaths -path $path -include $include -exclude $exclude -name:$name -computerName $computerName -recurse)
 }
 
 function GetHandlerProjectPaths {
@@ -192,7 +233,8 @@ function GetHandlerProjectPaths {
 		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
 		[ValidateNotNullOrEmpty()]
 		[string] $path,
-		[string[]] $include = @("*.Handlers","*.Saga","*.Service","*.TimeoutManager"),
+		[string] $include = "\.Handlers$",
+		[string] $exclude,
 		[switch] $name,
 		[switch] $recurse,
 		$computerName,
@@ -206,18 +248,25 @@ function GetHandlerProjectPaths {
 	}
 	
 	$scriptBlock = {
-		Param($rootPath, $include)
-		$includePath = $rootPath.TrimEnd('\') + "*"
+		Param($rootPath, $include, $exclude)
 		
-		if((test-path $path -pathType container) -eq $false) {
+		if((test-path $rootPath -pathType container) -eq $false) {
 			@()
 		}
 		else {
-			get-childitem -path $includePath -include $include -recurse | where { $_.PsIsContainer }
+			$items = get-childitem -path $rootPath -recurse | where { $_.PsIsContainer } 
+						
+			$items = $items | Where { $_ -match $include }
+			
+			if(![string]::IsNullOrEmpty($exclude)) {
+				$items = $items | Where { $_ -notmatch $exclude }
+			}
+
+			$items
 		}
 	}
 		
-	$args = @($path, $include)
+	$args = @($path, $include, $exclude)
 	
 	if($computerName -ne $null) {
 		write-verbose "Get-HandlerProjectPaths on computer: $computerName"
@@ -253,281 +302,239 @@ function PackageHandler {
 	
 	$paths | foreach {
 		$path = $_
-		$handlerName = $path.Name
 		
-		$destinationPath = join-path $destination $handlerName
-		
-		new-directory $destinationPath
-		
-		#$destinationPath = join-path $destinationPath "$handlerName.zip"
-		
-		$sourcePath = join-path $path.FullName "bin\$configuration"
-
-		if(!(test-path $sourcepath -PathType Container)) { write-error "Could not find source path ( $sourcePath ). Did you forget to compile?" }
-
-		write-host "Packaging Handler: $handlerName"
-		write-host "  Source: $sourcePath" 
-		write-host "  Destination: $destinationPath"
-
-		Sync-Provider -sourcePath $sourcePath -sourceProvider "dirPath" -destinationPath $destinationPath -destinationProvider "dirpath"
-	}
-}
-
-function DeployHandler {
-	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNull()]
-		$paths,
-		[parameter(Mandatory=$true)]
-		[ValidateNotNullOrEmpty()]
-		$destinationPath,
-		$computerName,
-		$credential
-	)
-	
-	if((test-path $destinationPath -pathType container) -eq $false) {
-		New-Item $destinationPath -type directory
-	}
-	
-	$paths | foreach {
-		$path = $_
-		$handlerName = $path.Name
+		if($path -ne $null) {
+			$handlerName = $path.Name
 			
-		$dest = join-path $destinationPath $handlerName
-		
-		write-host ("Deploying Handler from {0} to {1}" -f $path, $dest)
-		
-		Sync-Provider -sourcePath $path.ToString() -sourceProvider "dirPath" -destinationPath $dest -destinationProvider "dirPath" -computer $computerName
+			$destinationPath = join-path $destination $handlerName
+			
+			new-directory $destinationPath
+			
+			#$destinationPath = join-path $destinationPath "$handlerName.zip"
+			
+			$sourcePath = join-path $path.FullName "bin\$configuration"
+
+			if(!(test-path $sourcepath -PathType Container)) { write-error "Could not find source path ( $sourcePath ). Did you forget to compile?" }
+
+			write-host "Packaging Handler: $handlerName"
+			write-host "  Source: $sourcePath" 
+			write-host "  Destination: $destinationPath"
+
+			Sync-Provider -sourcePath $sourcePath -sourceProvider "dirPath" -destinationPath $destinationPath -destinationProvider "dirpath"
+		}
 	}
 }
 
-function NewHandlerInputQueue {
+function SyncHandlerFolders {
 	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNull()]
-		$paths,
-		$computerName,
-		$credential
+		$syncInfo,
+		$session
+	)
+
+	write-host "Syncing Handler Folders:"
+
+	$syncInfo.Values | foreach {
+		$path = $_.Path
+		$handlerName = $_.Name
+		
+		if($_.Action -eq "Install") {
+			$dest = $_.DestinationPath
+			
+			write-host ("Copying Handler {0}" -f $handlerName)
+			write-verbose ("Copying From {0}" -f $path)
+			write-verbose ("Copying To {0}" -f $dest)
+			
+			$computer = $null
+			
+			if($session -ne $null) {
+				$computer = $session.ComputerName
+			}
+
+			Sync-Provider -sourcePath $path.ToString() -sourceProvider "dirPath" -destinationPath $dest -destinationProvider "dirPath" -computer $computer
+		}
+		else {
+			write-verbose ("Removing From {0}" -f $path)
+			
+			Invoke-CommandLocalOrRemotely -session $session -argumentList @($path) -scriptblock {
+				Param($path)
+				Remove-Item -path $path -force -recurse
+			}
+		}
+	}
+}
+
+function StopServices {
+	param(
+		$syncInfo,
+		$session
 	)
 	
-	$paths | foreach {
-		$path = $_
-		$inputQueueName = Get-HandlerInputQueue $path
+	write-host "Stopping handler services"
+	
+	Invoke-CommandLocalOrRemotely -session $session -argumentList @($syncInfo) -scriptblock {	
+		Param($syncInfo)
+		$syncInfo.Values | foreach {
+			$name = $_.Name
+			
+			$isInstalled = (Get-Service -include $name) -ne $null
+
+			if(!$isInstalled) {
+				write-host ("Service not found. Skipping {0}" -f $name)
+			}
+			else {
+                write-host ("Stopping {0}" -f $name)
+                $service = Stop-Service -Name $name -force -passthru
+				
+				#wait 30 seconds for the service to get deleted
+				while(($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) -and ($elapsed -lt 30000)) {
+					start-sleep -Milliseconds 20 | out-null
+					$elapsed += 20
+				}
+
+				if($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+					write-error "Service has not been stopped after timeout"
+				}
+			}
+		}
+	}
+}
+
+function UninstallServices {
+	param(
+		$syncInfo,
+		$session
+	)
+	
+	write-host "Uninstalling handler services"
+	
+	Invoke-CommandLocalOrRemotely -session $session -argumentList @($syncInfo) -scriptblock {	
+		Param($syncInfo)
+		$syncInfo.Values | where { $_.Action -eq "Uninstall" } | foreach {
+			$name = $_.Name
+			
+			$isInstalled = (Get-Service -include $name) -ne $null
+				
+			if(!$isInstalled) {
+				write-host ("Skipping {0}" -f $name)
+			}
+			else {
+                write-host ("Stopping {0}" -f $name)
+                
+                Stop-Service -Name $name | out-null
+				#exit
+				write-host ("Uninstalling {0}" -f $name)
+				$service = get-wmiobject win32_service -filter "name='$name'"
+				$service.Delete() | out-null
+				
+				$elapsed = 0
+				
+				#wait for 30 seconds for the service to get deleted
+				while(((Get-Service -include $name) -ne $null) -and ($elapsed -lt 30000)) {
+					start-sleep -Milliseconds 50  | out-null
+					$elapsed += 50
+				}
+				
+				if((Get-Service -include $name) -ne $null) {
+					write-error "Service has not been deleted after timeout"
+				}
+			}
+		}
+	}
+}
+
+function InstallQueues {
+	param(
+		$syncInfo,
+		$session
+	)
+	
+	$syncInfo.Values | where { $_.Action -eq "Install" } | foreach {
+		$inputQueueName = $_.Name
 		
 		write-host "Creating handler queue: $inputQueueName"
 
-		New-PrivateMSMQQueue -name $inputQueueName -admins @("NT AUTHORITY\SYSTEM") -computerName $computerName -credential $credential
+		New-PrivateMSMQQueue -name $inputQueueName -admins $admins -session $session
 	}
 }
 
-function InstallHandler {
+function InstallServices {
 	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNull()]
-		$paths,
+		$syncInfo,
 		$profile,
-		$computerName,
-		$credential
-	)
+		$session
+	)	
+	if($profile -eq $null) {
+		$profile = "NServiceBus.Production"
+	}
 
-	$session = $null
-	
-	if($computerName -ne $null) {
-		$profile = "NServiceBus.Lite"
-	}
-	
-	if($computerName -ne $null) {
-		write-verbose "Install-Handler on computer: $computerName"
-		$session = New-PSSession -computerName $computerName -credential $credential
-	}
-	
-	$scriptBlock = {
-		Param($nsbHostPath, $handlerName, $profile)
-		if(!(test-path $nsbHostPath)) { write-error "Could not install handler '$handlerName' Unable to find NServiceBus.Host.exe at $nsbHostPath" }
-
-		& $nsbHostPath $profile /install /serviceName:$handlerName /displayName:$handlerName
-
-		if($LastExitCode -ne 0) { write-error "$handlerName did not install correctly" }
-	}
-	
-	write-host "Installing the following endpoints with the '$profile' profile:"
-	
-	$jobs = $paths | foreach {
-		$path = $_
-		$handlerName = Get-HandlerName $path
+	$syncInfo.Values | where { $_.Action -eq "Install" } | foreach {
+		$inputQueueName = $_.Name
+		$path = $_.DestinationExePath
+		write-host "Installing Service '$inputQueueName'"
 		
-		write-host "$handlerName"
-		
-		$nsbHostPath = join-path $path "NServiceBus.Host.exe"
-	
-		$args = @($nsbHostPath, $handlerName, $profile)
-		
-		if($session -ne $null) {
-			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock -asJob -jobName $handlerName
-		}else {
-			start-job -scriptblock $scriptBlock -ArgumentList $args -name $handlerName
-		}
-	}
-	
-	if($jobs -ne $null) {
-	
-		$success = $true;
-	
-		### Wait & Review the output from each job 
-		$jobs | Wait-Job | foreach {
-			$job = $_
-			if($job.State -eq "Failed") {
-				write-host ($job.Name + " failed to install because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
-				$success = $false
+		Invoke-CommandLocalOrRemotely -session $session -argumentList @($inputQueueName, $path, $profile) -scriptblock {
+			Param($name, $path, $profile)
+			
+			$pathName = "$path -service $profile /servicename:$name"
+			
+			$service = get-wmiobject win32_service -filter "name='$name'"
+						
+			if($service -eq $null) 
+			{
+				new-service -name $name -displayName $name -Description $name -binaryPathName $pathName | out-null
 			}
-			else {
-				write-host ($job.Name + " installed successfully")
+			elseif($service.PathName -ne $pathName) 
+			{
+				write-host ("Service found. Reinstalling {0}" -f $name)
+				$service.Delete() | out-null
+				
+				new-service -name $name -displayName $name -Description $name -binaryPathName $pathName | out-null
 			}
 		}
-		
-		### Remove the jobs 
-		$jobs | Remove-Job
-		
-		if(!$success) {
-			write-error "One or more endpoints failed to install"
-		}
 	}
-	
-	if($session -ne $null) { Remove-PSSession $session }
 }
 
-function UninstallHandler {
+function StartServices {
 	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNull()]
-		$paths,
-		$computerName,
-		$credential
+		$syncInfo,
+		$session
 	)
-	
-	$session = $null
-	
-	if($computerName -ne $null) {
-		write-verbose "Install-Handler on computer: $computerName"
-		$session = New-PSSession -computerName $computerName -credential $credential
-	}
-	
-	$scriptBlock = {
-		Param($nsbHostPath, $handlerName)
-		if(!(test-path $nsbHostPath)) { write-error "Could not uninstall handler '$handlerName' Unable to find NServiceBus.Host.exe at $nsbHostPath" }
 
-		& $nsbHostPath /uninstall /serviceName:$handlerName
+	Invoke-CommandLocalOrRemotely -session $session -argumentList @($syncInfo) -scriptblock {
+		Param($syncInfo)
+		
+		$syncInfo.Values | where { $_.Action -eq "Install" } | foreach {
+			$name = $_.Name
 
-		if($LastExitCode -ne 0) { write-error "$handlerName did not uninstall correctly" }
-	}
-	
-	write-host "Uninstalling the following endpoints:"
-	
-	$jobs = $paths | foreach {
-		$path = $_
-		$handlerName = Get-HandlerName $path
-
-		write-host "$handlerName"
-
-		$nsbHostPath = join-path $path "NServiceBus.Host.exe"
-
-		$args = @($nsbHostPath, $handlerName)
-
-		if($session -ne $null) {
-			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock -asJob -jobName $handlerName
-		}else {
-			start-job -scriptblock $scriptBlock -ArgumentList $args -name $handlerName
+			write-host "Starting handler service '$name'"
+			
+			$service = start-service -name $name -passThru
+			
+			#$service | wait-process -timeout 50
+			
+			#if($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+			#	write-host "Service did not start before timeout"
+			#}
+			
 		}
 	}
-		
-	if($jobs -ne $null) {
-		$success = $true;
-		
-		### Wait & Review the output from each job 
-		$jobs | Wait-Job | foreach {
-			$job = $_
-			if($job.State -eq "Failed") {
-				write-host ($job.Name + " failed to uninstall because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
-				$success = $false
-			}
-			else {
-				write-host ($job.Name + " uninstalled successfully")
-			}
-		}
-		
-		### Remove the jobs 
-		$jobs | Remove-Job
-		
-		if(!$success) {
-			write-error "One or more endpoints failed to uninstall"
-		}
-	}
-	
-	if($session -ne $null) { Remove-PSSession $session }
 }
 
-function StartHandler {
+function Invoke-CommandLocalOrRemotely {
 	param(
-		[parameter(Mandatory=$true, ValueFromPipeline = $true)]
-		[ValidateNotNull()]
-		$paths,
-		$computerName,
-		$credential
+		$scriptBlock,
+		$argumentList = @(),
+		$session
 	)
-
-	$session = $null
 	
-	if($computerName -ne $null) {
-		write-verbose "Start-Handler on computer: $computerName"
-		$session = New-PSSession -computerName $computerName -credential $credential
+	if($session -ne $null) {
+		write-verbose ("Running on computer {0}" -f $session.ComputerName)
+		return invoke-command -session $session -argumentList $argumentList -scriptblock $scriptBlock
 	}
-	
-	$scriptBlock = {
-		Param($handlerName)
-		
-		Start-Service $handlerName
+	else {
+		write-verbose "Running locally"
+		return $scriptBlock.Invoke($argumentList)
 	}
-	
-	write-host "Starting the following endpoints:"
-	
-	$jobs = $paths | foreach {
-		$path = $_
-		$handlerName = Get-HandlerName $path
-		
-		write-host "$handlerName"
-		
-		$args = @($handlerName)
-		
-		if($session -ne $null) {
-			invoke-command -session $session -argumentList $args -scriptblock $scriptBlock -asJob -jobName $handlerName
-		}else {
-			start-job -scriptblock $scriptBlock -ArgumentList $args -name $handlerName
-		}
-	}
-	
-	if($jobs -ne $null) {
-		$success = $true;
-		
-		### Wait & Review the output from each job 
-		$jobs | Wait-Job | foreach {
-			$job = $_
-			if($job.State -eq "Failed") {
-				write-host ($job.Name + " failed to start because of the following reason: " + $job.childjobs[0].jobstateinfo.Reason)
-				$success = $false
-			}
-			else {
-				write-host ($job.Name + " started successfully")
-			}
-		}
-		
-		### Remove the jobs 
-		$jobs | Remove-Job
-		
-		if(!$success) {
-			write-error "One or more endpoints failed to start"
-		}
-	}
-	if($session -ne $null) { Remove-PSSession $session }
 }
 
-Export-ModuleMember -Function "Release-Handler", "Deploy-Handler", "Get-HandlerProjectPaths", "Package-Handler", "Copy-HandlerProjectOutput", "Install-Handler", "Uninstall-Handler", "New-HandlerInputQueue", "Get-HandlerInputQueue"
+Export-ModuleMember -Function "Release-Handler", "Uninstall-Handler", "Create-HandlerQueues", "Get-HandlerProjectPaths", "Package-Handler"

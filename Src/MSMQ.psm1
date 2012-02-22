@@ -4,12 +4,15 @@ function New-PrivateMSMQQueue {
 		[ValidateNotNullOrEmpty()]
 		[string]$name,
 		[bool] $transactional = $true,
-		[string[]]$admins,
+		[string[]]$admins = @("NT AUTHORITY\SYSTEM"),
 		$computerName,
-		$credential
+		$credential,
+		$session
 	) 
 	
-	$scriptblock = {
+	$args = @($name, $admins, $transactional)
+	
+	Invoke-CommandLocalOrRemotely -session $session -computerName $computerName -credential $credential -argumentList $args -ea Stop -scriptblock {
 		Param($name, $admins, $transactional)
 		[void][System.Reflection.Assembly]::LoadWithPartialName("System.Messaging")
 		
@@ -17,7 +20,7 @@ function New-PrivateMSMQQueue {
 		
 		if ([System.Messaging.MessageQueue]::Exists($queuePath))
 		{
-			write-host "$name already exists"
+			write-host "Queue '$name' already exists"
 			
 			$queue = new-object System.Messaging.MessageQueue -argumentList $queuePath
 		}
@@ -27,32 +30,22 @@ function New-PrivateMSMQQueue {
 			
 			if ([System.Messaging.MessageQueue]::Exists($queuePath))
 			{
-				write-host "Private queue ""$name"" has been created"
+				write-host "Private queue '$name' has been created"
 				$queue.Label = $name
 			}
 			else
 			{
-				write-error "$name could not be created!!!"
+				write-error "Queue '$name' could not be created!!!"
 			}
 		}		
 	
 		$queue.SetPermissions("BUILTIN\Administrators", [System.Messaging.MessageQueueAccessRights]::FullControl, [System.Messaging.AccessControlEntryType]::Set)
-
-		$admins | foreach {
-			$queue.SetPermissions($_, [System.Messaging.MessageQueueAccessRights]::FullControl, [System.Messaging.AccessControlEntryType]::Set)
+		
+		if($admins -ne $null) {
+			$admins | foreach {
+				$queue.SetPermissions($_, [System.Messaging.MessageQueueAccessRights]::FullControl, [System.Messaging.AccessControlEntryType]::Set)
+			}
 		}
-	}
-	
-	$args = @($name, $admins, $transactional)
-	
-	if($computerName -ne $null) {
-		write-verbose "New-PrivateMSMQQueue on computer: $computerName"
-		$session = New-PSSession -computerName $computerName -credential $credential
-		invoke-command -session $session -argumentList $args -scriptblock $scriptBlock
-		Remove-PSSession $session
-	}
-	else {
-		$scriptBlock.Invoke($args)
 	}
 }
 
